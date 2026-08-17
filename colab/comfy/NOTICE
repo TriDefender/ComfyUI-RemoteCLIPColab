@@ -1,0 +1,4 @@
+﻿Vendored from ComfyUI (https://github.com/comfyanonymous/ComfyUI), which is
+licensed under the GNU General Public License v3.0. Copies here are modified
+only by the sync script (vendor_comfy.ps1); see the upstream repository for
+the source of each file and its full license text.

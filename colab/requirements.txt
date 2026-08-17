@@ -1,0 +1,14 @@
+torch
+transformers>=4.51
+safetensors
+fastapi
+uvicorn
+numpy
+huggingface_hub
+accelerate
+sentencepiece
+protobuf
+einops
+pyyaml
+comfy-kitchen
+comfy-aimdo

@@ -1,0 +1,14 @@
+[project]
+name = "remoteclipcolab"
+description = "Run CLIP/text encoders on a remote Colab runtime behind a built-in tunnel; RESTful control from local ComfyUI"
+version = "0.1.0"
+dependencies = []
+
+[project.urls]
+Repository = "https://example.invalid/ComfyUI-RemoteCLIPColab"
+
+[tool.comfy]
+PublisherId = "local"
+DisplayName = "ComfyUI-RemoteCLIPColab"
+Icon = ""
+includes = []
