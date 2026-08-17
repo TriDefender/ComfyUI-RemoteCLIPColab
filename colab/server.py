@@ -14,6 +14,7 @@ from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import JSONResponse
 
 import engines as eng
+import engines_native
 import packing
 
 JOB_RETENTION_SECONDS = 30 * 60
@@ -90,12 +91,13 @@ def create_app(registry, tunnel=None, token="", encode_timeout=90.0):
         spec = await request.json()
         if "name" not in spec or "kind" not in spec:
             raise HTTPException(422, "spec requires 'name' and 'kind'")
-        native = (spec.get("engine") == "native" or spec.get("kind") == "native"
-                  or "sources" in spec)
+        native = engines_native.dispatch_is_native(spec)
         if native:
-            sources = spec.get("sources")
-            if not isinstance(sources, list) or not sources:
-                raise HTTPException(422, "native specs require 'sources': [paths]")
+            has_sources = (isinstance(spec.get("sources"), (list, tuple)) and spec["sources"]) \
+                or bool(spec.get("source"))
+            if not has_sources:
+                raise HTTPException(422, "native specs require 'sources': [paths] "
+                                         "(or a single 'source' path)")
             if spec.get("kind") == "native" and not spec.get("clip_type"):
                 raise HTTPException(422, "kind 'native' requires 'clip_type'")
         elif spec["kind"] in ("sdxl", "sd3", "flux") and "components" not in spec:

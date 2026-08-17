@@ -17,6 +17,24 @@ Two roles:
 Transport is always fp16 to keep payloads small; embeddings are restored to
 their original dtype on arrival.
 
+## Inference acceleration
+
+- **GPU / native backend** — `--attention auto|sdpa|sage|flash` selects the
+  attention kernel through ComfyUI's own dispatch (same flags as upstream
+  `--use-sage-attention` etc.; `sage` needs `pip install sageattention`,
+  `flash` needs `flash-attn`). Note: text encoders run the small-input path
+  where ComfyUI already defaults to fused SDPA on NVIDIA + torch ≥ 2, so the
+  default (`auto`) is already fast for CLIP/T5; explicit sage/flash mainly
+  matters for other vendored-model paths.
+- **GPU / hf backend** — `--attention-hf sdpa|eager|flash_attention_2` is
+  passed to `from_pretrained` (`sdpa` default).
+- **TPU** — `--xla-cache DIR` persists compiled XLA executables so
+  recompilation survives worker restarts (measured on a real v5e: first
+  request after restart 11.3 s → 8.4 s, steady-state ~2 s unchanged; the
+  remaining time is the ~10 GB weight transfer). The notebook's `XLA_CACHE`
+  toggle enables it at `/content/rcp_xla_cache`. TPU attention kernels are
+  chosen by the XLA compiler itself — no per-model flag applies.
+
 ## Engine backends
 
 The worker has two interchangeable text-encoder backends (`--engine auto|native|hf`):

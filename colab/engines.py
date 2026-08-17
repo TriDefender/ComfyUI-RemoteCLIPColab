@@ -24,6 +24,27 @@ try:
 except ImportError:
     xm = None
 
+# TPU: persist compiled executables so XLA recompiles happen once per machine
+# (across worker restarts), not once per process. Enabled via --xla-cache.
+XLA_CACHE_DIR = None
+
+
+def enable_xla_persistent_cache(path):
+    global XLA_CACHE_DIR
+    if xm is None:
+        raise RuntimeError("--xla-cache requires torch_xla (TPU runtime)")
+    os.makedirs(path, exist_ok=True)
+    XLA_CACHE_DIR = path
+    os.environ["XLA_PERSISTENT_CACHE_PATH"] = path
+
+
+def _hf_attn_kwargs(device):
+    """Attention implementation for HF from_pretrained loads. XLA compiles its
+    own fused attention, so only CUDA gets an explicit kernel choice."""
+    if device is not None and device.type == "cuda":
+        return {"attn_implementation": os.environ.get("RCP_ATTENTION_HF", "sdpa")}
+    return {}
+
 from transformers import (
     AutoTokenizer,
     CLIPTextConfig,
@@ -458,7 +479,7 @@ def _load_safetensors(source):
     return load_safetensors(source, device="cpu")
 
 
-def load_clip_text_model(source, variant, dtype):
+def load_clip_text_model(source, variant, dtype, device=None):
     """variant: clip_l / clip_g. Accepts HF repo, HF-format local dir, or a
     comfy-format safetensors file/dir (keys prefixed with 'transformer.')."""
     if _looks_like_path(source) and not os.path.exists(source):
@@ -477,14 +498,15 @@ def load_clip_text_model(source, variant, dtype):
             raise RuntimeError(f"clip {variant}: checkpoint missing encoder weights: {missing[:4]}")
         model.has_projection = "text_projection.weight" not in missing
     else:
-        model = CLIPTextModelWithProjection.from_pretrained(source, torch_dtype=dtype)
+        model = CLIPTextModelWithProjection.from_pretrained(source, torch_dtype=dtype,
+                                                            **_hf_attn_kwargs(device))
         model.has_projection = True
     model = model.to(dtype)
     model.eval()
     return model
 
 
-def load_t5_model(source, dtype):
+def load_t5_model(source, dtype, device=None):
     if _looks_like_path(source) and not os.path.exists(source):
         raise FileNotFoundError(f"model file not found on worker: {source}")
     if os.path.exists(source) and not _is_hf_dir(source):
@@ -498,7 +520,8 @@ def load_t5_model(source, dtype):
         if any("encoder.block" in k for k in missing):
             raise RuntimeError(f"t5: checkpoint missing encoder weights: {missing[:4]}")
     else:
-        model = T5EncoderModel.from_pretrained(source, torch_dtype=dtype)
+        model = T5EncoderModel.from_pretrained(source, torch_dtype=dtype,
+                                               **_hf_attn_kwargs(device))
     model = model.to(dtype)
     model.eval()
     return model
@@ -573,7 +596,8 @@ class ClipVariantEngine:
         self.variant = variant
         self.device = device
         self.dtype = dtype
-        self.model = load_clip_text_model(source, "clip_l" if variant.endswith("clip_l") else "clip_g", dtype)
+        self.model = load_clip_text_model(source, "clip_l" if variant.endswith("clip_l") else "clip_g",
+                                          dtype, device)
         self.model.to(device)
         tok_kind = "clip_l" if variant.endswith("clip_l") else "clip_g"
         self.tokenizer = WeightedTokenizer(
@@ -640,7 +664,7 @@ class T5Engine:
         self.device = device
         self.dtype = dtype
         self.min_length = min_length
-        self.model = load_t5_model(source, dtype)
+        self.model = load_t5_model(source, dtype, device)
         self.model.to(device)
         self.tokenizer = WeightedTokenizer(
             get_tokenizer("t5", tokenizer_src), max_length=99999999,
@@ -773,7 +797,8 @@ class QwenImageEngine:
         self.kind = "qwen_image"
         self.device = device
         self.dtype = dtype
-        self.model = Qwen2VLForConditionalGeneration.from_pretrained(source, torch_dtype=dtype)
+        self.model = Qwen2VLForConditionalGeneration.from_pretrained(source, torch_dtype=dtype,
+                                                                     **_hf_attn_kwargs(device))
         self.model.to(device)
         self.model.eval()
         self.processor = AutoProcessor.from_pretrained(source)
@@ -881,9 +906,11 @@ class CausalLMEngine:
         config = AutoConfig.from_pretrained(source)
         try:
             from transformers import AutoModelForImageTextToText
-            self.model = AutoModelForImageTextToText.from_pretrained(source, torch_dtype=dtype)
+            self.model = AutoModelForImageTextToText.from_pretrained(source, torch_dtype=dtype,
+                                                                     **_hf_attn_kwargs(device))
         except (ValueError, OSError):
-            self.model = AutoModelForCausalLM.from_pretrained(source, torch_dtype=dtype)
+            self.model = AutoModelForCausalLM.from_pretrained(source, torch_dtype=dtype,
+                                                              **_hf_attn_kwargs(device))
         self.model.to(device)
         self.model.eval()
         self.processor = None
@@ -1137,9 +1164,7 @@ class EngineRegistry:
 
     def build_engine(self, spec, _top=True):
         kind = spec.get("kind", "")
-        is_native = (spec.get("engine") == "native" or kind == "native"
-                     or (kind in engines_native.NATIVE_KINDS and "sources" in spec))
-        if is_native:
+        if engines_native.dispatch_is_native(spec):
             engine = engines_native.build_native_engine(spec, self)
             if engine is None:
                 raise ValueError(f"unknown engine kind: {kind}")

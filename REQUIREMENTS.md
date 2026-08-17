@@ -19,6 +19,17 @@
 >   首次 encode 含 XLA 编译 9.9 s，同 bucket 复用 1.4 s。客户端 encode 超时
 >   因此从 120 s 提升至 600 s（ENCODE_TIMEOUT）。notebook cell 1 在 TPU 上
 >   跳过 torch/comfy-kitchen 安装（保护镜像预装的 torch↔torch_xla 配对）。
+>
+> **推理加速（2026-08-17 第二轮）**：
+> - GPU native：`--attention auto|sdpa|sage|flash` 接入 comfy 本体注意力分派
+>   （import 前注入 cli_args，engines_native 惰性导入重构）。实测（4060 Ti）：
+>   文本编码器走 small-input 路径，NVIDIA+torch≥2 已默认 SDPA 融合核，
+>   三模式输出逐位一致（rel 0.0）——与上游 comfy 行为一致，sage/flash 对
+>   小 token 数文本编码器无收益（属扩散模型大序列优化）。
+> - GPU hf：`--attention-hf sdpa|eager|flash_attention_2` 传入 from_pretrained。
+> - TPU：`--xla-cache DIR` 持久化 XLA 编译产物。真机 v5e 对照：跨 worker
+>   重启首请求 **11.3 s → 8.4 s**（消除重编译；剩余为 ~10 GB 权重装载），
+>   热路径 ~2 s 不变。notebook 新增 ATTENTION/ATTENTION_HF/XLA_CACHE 表单项。
 > 原确认结论：Q1 Phase 1+2 合并；传输固定 fp16；TPU v5e 走 hf 后端
 >（bf16 计算 + 形状分桶，待 Colab 实测）。
 > 原型：`custom_nodes/ComfyUI-RemoteCLIPLoader`（v1.2.2，下称"旧版"）。

@@ -12,6 +12,27 @@ import secrets
 import sys
 import time
 
+# Attention mode must reach the vendored stack before comfy is first imported
+# (its attention dispatch binds at import time), so pre-scan argv here.
+def _prescan_attention():
+    modes = ("auto", "sdpa", "sage", "flash")
+    for i, a in enumerate(sys.argv):
+        if a == "--attention" and i + 1 < len(sys.argv):
+            mode = sys.argv[i + 1]
+            if mode not in modes:
+                raise SystemExit(f"--attention must be one of {modes}, got '{mode}'")
+            os.environ["RCP_ATTENTION"] = mode
+            return
+        if a.startswith("--attention="):
+            mode = a.split("=", 1)[1]
+            if mode not in modes:
+                raise SystemExit(f"--attention must be one of {modes}, got '{mode}'")
+            os.environ["RCP_ATTENTION"] = mode
+            return
+
+
+_prescan_attention()
+
 import uvicorn
 
 import engines as eng
@@ -35,9 +56,6 @@ def probe_native():
 
 def resolve_engine_mode(requested):
     if requested == "native":
-        if not engines_native.VENDORED_OK:
-            raise SystemExit(f"--engine native requested but the vendored comfy stack "
-                             f"is unavailable: {engines_native.vendored_status()}")
         return "native"
     if requested == "hf":
         return "hf"
@@ -76,6 +94,17 @@ def main():
     parser.add_argument("--engine", default="auto", choices=["auto", "native", "hf"],
                         help="text-encoder backend: native (vendored comfy stack, full "
                              "format coverage) or hf (pure transformers). auto probes.")
+    parser.add_argument("--attention", default=os.environ.get("RCP_ATTENTION", "auto"),
+                        choices=["auto", "sdpa", "sage", "flash"],
+                        help="native-backend attention kernel: auto (comfy default "
+                             "sub-quad), sdpa (torch scaled_dot_product_attention), "
+                             "sage (sageattention pkg), flash (flash-attn pkg)")
+    parser.add_argument("--attention-hf", default="sdpa", choices=["sdpa", "eager", "flash_attention_2"],
+                        help="hf-backend attention implementation passed to "
+                             "from_pretrained (CUDA only; TPU/XLA picks its own kernel)")
+    parser.add_argument("--xla-cache", default=None, metavar="DIR",
+                        help="TPU only: persist XLA compiled executables to DIR so "
+                             "recompiles survive worker restarts")
     parser.add_argument("--models-dir", default="./models", help="directory scanned by GET /v1/models")
     parser.add_argument("--loras-dir", default="./models/loras")
     parser.add_argument("--embeddings-dir", default="./models/embeddings")
@@ -88,9 +117,15 @@ def main():
                         help="auto-shutdown after this many seconds (0 = run forever)")
     parser.add_argument("--log-level", default="info")
     args = parser.parse_args()
+    if args.attention != "auto":
+        os.environ["RCP_ATTENTION"] = args.attention
     if args.device == "tpu":
         args.engine = "hf" if args.engine == "native" else args.engine
     args.engine_mode = resolve_engine_mode(args.engine)
+    os.environ.setdefault("RCP_ATTENTION_HF", args.attention_hf)
+    if args.xla_cache:
+        eng.enable_xla_persistent_cache(args.xla_cache)
+        print(f"xla persistent cache: {args.xla_cache}")
 
     for d in (args.models_dir, args.loras_dir, args.embeddings_dir):
         os.makedirs(d, exist_ok=True)
@@ -133,8 +168,9 @@ def main():
     print("=" * 62)
     gpu = eng.gpu_summary()
     print(f"  device : {gpu}")
+    attention_desc = f" (attention: {os.environ.get('RCP_ATTENTION', 'auto')})" if args.engine_mode == "native" else ""
     print(f"  engine : {args.engine_mode}"
-          + ("" if args.engine_mode != "native" else f" ({engines_native.vendored_status().get('available')})"))
+          + ("" if args.engine_mode != "native" else " (vendored comfy stack)" + attention_desc))
     print(f"  listen : http://{host}:{args.port}")
     print(f"  tunnel : {args.tunnel}")
     if specs:
@@ -145,7 +181,8 @@ def main():
 
     for spec in specs:
         t0 = time.time()
-        print(f"loading {spec.get('name', spec.get('kind'))} from {spec.get('source', spec.get('components'))} ...", flush=True)
+        origin = spec.get("sources") or spec.get("source") or spec.get("components")
+        print(f"loading {spec.get('name', spec.get('kind'))} from {origin} ...", flush=True)
         registry.build_engine(spec)
         print(f"  loaded in {time.time() - t0:.1f}s", flush=True)
     pending_default = getattr(registry, "_pending_default", None)
