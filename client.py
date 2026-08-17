@@ -17,6 +17,7 @@ LEN_SIZE = struct.calcsize(LEN_FMT)
 MAX_META_BYTES = 8 * 1024 * 1024
 MAX_BLOB_BYTES = 512 * 1024 * 1024
 SOCKET_TIMEOUT = 120
+ENCODE_TIMEOUT = 600
 GENERATE_TIMEOUT = 3600
 ENCODE_RETRIES = 4
 PACKED_CONTENT_TYPE = "application/x-rcp-v3"
@@ -200,7 +201,7 @@ class RemoteCLIPClient:
                 _status, resp, _headers = self._request(
                     "POST", "/v1/encode", body,
                     headers={"Content-Type": PACKED_CONTENT_TYPE},
-                    timeout=SOCKET_TIMEOUT)
+                    timeout=ENCODE_TIMEOUT)
                 meta, tensors = parse(resp)
                 if meta.get("error"):
                     raise WorkerError(f"remote worker error: {meta['error']}")

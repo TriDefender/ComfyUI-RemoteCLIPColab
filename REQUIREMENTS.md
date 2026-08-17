@@ -12,6 +12,13 @@
 > 验证（RTX 4060 Ti, native）：clip_l/sdxl/flux 形状正确、LoRA 注入/回退干净、
 > **MiniMax H3 qwen3vl-32b NVFP4 加载 3s + 编码 19s（含 token_tags 输出）**；
 > hf 回退（CPU-only torch）与共存正常。
+> **真实 Colab 实测（2026-08-17，google-colab-cli）**：
+> - T4 GPU（native 后端 + Cloudflare 隧道）：本机→公网全链路 9/9 PASS
+>   （TEST_REPORT_T4.md）；flux encode 3.4 s。
+> - TPU v5e（hf 后端，bf16 + 形状分桶）：9/9 PASS（TEST_REPORT_TPU.md）；
+>   首次 encode 含 XLA 编译 9.9 s，同 bucket 复用 1.4 s。客户端 encode 超时
+>   因此从 120 s 提升至 600 s（ENCODE_TIMEOUT）。notebook cell 1 在 TPU 上
+>   跳过 torch/comfy-kitchen 安装（保护镜像预装的 torch↔torch_xla 配对）。
 > 原确认结论：Q1 Phase 1+2 合并；传输固定 fp16；TPU v5e 走 hf 后端
 >（bf16 计算 + 形状分桶，待 Colab 实测）。
 > 原型：`custom_nodes/ComfyUI-RemoteCLIPLoader`（v1.2.2，下称"旧版"）。
