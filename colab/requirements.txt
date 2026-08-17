@@ -1,4 +1,6 @@
-torch
+# torch is NOT listed on purpose: install a build matching your hardware
+# (Colab/preinstalled environments already provide CUDA/XLA torch; letting pip
+# resolve torch from PyPI replaces them with CPU wheels).
 transformers>=4.51
 safetensors
 fastapi

@@ -113,6 +113,11 @@ def create_app(registry, tunnel=None, token="", encode_timeout=90.0):
             raise HTTPException(404, str(e))
         except (ValueError, RuntimeError, OSError) as e:
             raise HTTPException(400, str(e))
+        except Exception as e:  # noqa: BLE001 - surface loader crashes as readable 400s
+            import traceback
+            raise HTTPException(
+                400, f"{type(e).__name__}: {e} | "
+                     f"{traceback.format_exc(limit=2).splitlines()[-2].strip()}")
         gpu = eng.gpu_summary()
         return {"loaded": engine.name, "kind": getattr(engine, "kind", spec["kind"]),
                 "load_seconds": engine.load_seconds, "gpu": gpu}

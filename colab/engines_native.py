@@ -88,6 +88,12 @@ def ensure_comfy():
     except ValueError:
         _comfy_error = "attention mode rejected"
         raise
+    except ModuleNotFoundError as e:
+        _comfy_error = (
+            f"the vendored stack is missing package '{e.name}' on this machine. "
+            "Run:  pip install -r colab/requirements.txt   "
+            "(installs comfy-aimdo / comfy-kitchen / etc.), then restart the worker.")
+        raise RuntimeError(_comfy_error) from None
     except Exception as e:  # noqa: BLE001 - fall back to HF engines
         _comfy_error = str(e)
         raise
@@ -223,7 +229,37 @@ class NativeEngine:
             pass
 
 
+MODEL_SUBDIRS = ("", "text_encoders", "clip")
+
+
+def _resolve_source(s, registry):
+    """Bare filenames resolve against the worker's model dirs (CLIPLoader-style
+    'just the file name'); path-like sources stay as-is."""
+    if os.path.isabs(s) or _looks_like_path(s):
+        return s
+    for sub in MODEL_SUBDIRS:
+        base = os.path.join(registry.models_dir, sub) if sub else registry.models_dir
+        candidate = os.path.join(base, s)
+        if os.path.isfile(candidate):
+            return candidate
+    return s
+
+
+def native_unavailable_reason():
+    """Why the vendored stack can't run here, or None if it can. XLA devices
+    have no comfy model-management path, so TPU machines must use hf engines."""
+    if _probe_import("torch_xla"):
+        return ("this worker runs on TPU, which the native (vendored comfy) backend "
+                "does not support; only the pure-transformers kinds "
+                "(clip_l/t5/qwen_image/causal_lm...) work here. Load quantized "
+                "checkpoint formats like minimax_h3 on a GPU runtime instead.")
+    return None
+
+
 def build_native_engine(spec, registry):
+    reason = native_unavailable_reason()
+    if reason:
+        raise RuntimeError(reason)
     kind = spec.get("kind")
     sources = spec.get("sources")
     if not sources and spec.get("source"):
@@ -231,10 +267,12 @@ def build_native_engine(spec, registry):
     if not sources or not isinstance(sources, (list, tuple)) or not all(isinstance(s, str) for s in sources):
         raise ValueError("native engines require 'sources': [checkpoint paths] "
                          "(or a single 'source' path)")
-    sources = [s if os.path.isabs(s) else os.path.abspath(s) for s in sources]
+    sources = [os.path.abspath(_resolve_source(s, registry)) for s in sources]
     for s in sources:
-        if _looks_like_path(s) and not os.path.exists(s):
-            raise FileNotFoundError(f"model file not found on worker: {s}")
+        if not os.path.exists(s):
+            raise FileNotFoundError(
+                f"model file not found on worker: {s} (looked in "
+                f"{registry.models_dir} and its subdirs for bare names)")
     clip_type = spec.get("clip_type")
     if kind in NATIVE_KINDS:
         ct_name, counts = NATIVE_KINDS[kind]
