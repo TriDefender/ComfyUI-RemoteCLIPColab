@@ -48,7 +48,8 @@ def probe_native():
     import sys
     try:
         r = subprocess.run([sys.executable, "-c", "import comfy.sd"],
-                           capture_output=True, timeout=120, cwd=os.getcwd())
+                           capture_output=True, timeout=120,
+                           cwd=os.path.dirname(os.path.abspath(__file__)))
         return r.returncode == 0
     except Exception:  # noqa: BLE001
         return False

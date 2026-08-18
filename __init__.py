@@ -110,8 +110,8 @@ class RemoteCLIPController:
                                "local files · list_loras: worker's models/loras · load_model: "
                                "load one (see kind/source fields) · unload_model/set_default: "
                                "by model_name · clear_cache: drop cached embeddings · tunnel: "
-                               "current public URL · shutdown: stop the worker "
-                               "(needs confirm via API)."}),
+                               "current public URL · shutdown: stop the worker (requires "
+                               "shutdown_confirm)."}),
             },
             "optional": {
                 "auth_token": ("STRING", {"default": "",
@@ -147,6 +147,9 @@ class RemoteCLIPController:
                 "dtype": (["auto", "bf16", "fp16", "fp32"], {"default": "auto",
                     "tooltip": "load_model compute dtype. auto = bf16 on GPU/TPU, fp32 on "
                                "CPU. Checkpoint kinds ignore this (comfy decides)."}),
+                "shutdown_confirm": ("BOOLEAN", {"default": False,
+                    "tooltip": "shutdown only: the worker is stopped exclusively when this "
+                               "is enabled, so queueing the node can't kill it by accident."}),
             }
         }
 
@@ -159,11 +162,12 @@ class RemoteCLIPController:
                    "Load Remote CLIP inputs (or just re-queue) to use the new engine.")
 
     def run_action(self, base_url, action, auth_token="", model_name="", kind="",
-                   source="", components="", sources="", clip_type="", dtype="auto"):
+                   source="", components="", sources="", clip_type="", dtype="auto",
+                   shutdown_confirm=False):
         client = RemoteCLIPClient(base_url.strip().rstrip("/"), auth_token)
         params = {"model_name": model_name, "kind": kind, "source": source,
                   "components": components, "sources": sources, "clip_type": clip_type,
-                  "dtype": dtype}
+                  "dtype": dtype, "shutdown_confirm": shutdown_confirm}
         result = client.control(action, params)
         lines = [f"{action}:"]
         formatted = json.dumps(result, indent=2, ensure_ascii=False, default=str)

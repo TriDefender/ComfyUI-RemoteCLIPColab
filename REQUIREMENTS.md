@@ -30,6 +30,23 @@
 > - TPU：`--xla-cache DIR` 持久化 XLA 编译产物。真机 v5e 对照：跨 worker
 >   重启首请求 **11.3 s → 8.4 s**（消除重编译；剩余为 ~10 GB 权重装载），
 >   热路径 ~2 s 不变。notebook 新增 ATTENTION/ATTENTION_HF/XLA_CACHE 表单项。
+>
+> **审查修复（2026-08-18，全项目 review，7 项）**：
+> - **hf 引擎 LoRA 泄漏（高危）**：encode/generate 空栈不再跳过
+>   `LoraPatcher.apply`（apply 兼任回退路径）；set_default/unload/同名重载经
+>   `_retire_engine` 重置 patcher（回退权重 + 释放 pristine CPU 副本）。
+>   回归实测 11/11（伪造引擎 + kohya LoRA：注入→空栈回退→换默认→卸载→generate 路径）。
+> - `probe_native` 子进程 cwd 固定为脚本目录：README 根目录直启 `python colab/worker.py`
+>   不再静默降级 hf（本机差分验证：根 cwd `No module named 'comfy'`，colab cwd 可导入）。
+> - 客户端网络层错误（URLError/Timeout/连接中断）统一包装为 WorkerError；
+>   503 `{"error":{...}}` 体提取可读 message；generate 轮询容忍 5 次连续瞬时失败
+>   （404 立即失败），超时后的 DELETE 清理失败不再掩盖超时错误——stub server 实测 8/8。
+> - `shutdown` 控制面新增 `shutdown_confirm` 布尔输入（默认 False，误排队不再杀 worker）；
+>   load_model 空 source 不下发（服务端 422 如期触发；空 components 同样 422）；
+>   native `_resolve_source` 裸文件名（带/不带扩展名）正确搜索 models 目录（9/9 用例）。
+> - notebook 删除 cell 5 ipywidgets 控制面板（实际使用不可用）——管理操作全部经由
+>   ComfyUI `Remote CLIP Controller` 节点；cell 6/7 顺次改为 5/6，README 与
+>   notebook 内提示同步更新。
 > 原确认结论：Q1 Phase 1+2 合并；传输固定 fp16；TPU v5e 走 hf 后端
 >（bf16 计算 + 形状分桶，待 Colab 实测）。
 > 原型：`custom_nodes/ComfyUI-RemoteCLIPLoader`（v1.2.2，下称"旧版"）。

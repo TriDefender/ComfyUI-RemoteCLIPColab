@@ -100,9 +100,9 @@ def create_app(registry, tunnel=None, token="", encode_timeout=90.0):
                                          "(or a single 'source' path)")
             if spec.get("kind") == "native" and not spec.get("clip_type"):
                 raise HTTPException(422, "kind 'native' requires 'clip_type'")
-        elif spec["kind"] in ("sdxl", "sd3", "flux") and "components" not in spec:
+        elif spec["kind"] in ("sdxl", "sd3", "flux") and not spec.get("components"):
             raise HTTPException(422, f"{spec['kind']} requires 'components'")
-        elif spec["kind"] not in ("sdxl", "sd3", "flux") and "source" not in spec:
+        elif spec["kind"] not in ("sdxl", "sd3", "flux") and not spec.get("source"):
             raise HTTPException(422, "spec requires 'source'")
         try:
             def build_locked():

@@ -57,15 +57,16 @@ The worker has two interchangeable text-encoder backends (`--engine auto|native|
 
 1. Runtime → Change runtime type → GPU (T4) or TPU v5e.
 2. Open `colab/RemoteCLIP_Colab.ipynb` in Colab (File → Upload notebook, or keep it
-   in your fork). It is a self-contained control panel:
+   in your fork). It is a self-contained launcher:
    - **cell 1** fetches the runtime (git clone / uploaded `colab/` folder / Drive)
      and installs dependencies,
    - **cell 2–3** configure and launch the worker in the background, printing the
      `base_url` + `auth_token` once the tunnel is up,
    - **cell 4** downloads text-encoder / LoRA files into `models/`,
-   - **cell 5** is an ipywidgets control panel (status, load/switch/unload
-     models, list LoRAs, clear cache, tunnel info, shutdown, encode test),
-   - **cells 6–7** tail the worker log and stop the worker.
+   - **cells 5–6** tail the worker log and stop the worker.
+   All worker management (status / load / switch / unload models, list LoRAs,
+   clear cache, tunnel info, shutdown) happens from ComfyUI through the
+   **Remote CLIP Controller** node — no notebook UI needed.
 3. Copy the printed `base_url` (`https://....trycloudflare.com`) and
    `auth_token` into the local node.
 

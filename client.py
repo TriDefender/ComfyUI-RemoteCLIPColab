@@ -3,6 +3,7 @@
 The packing helpers mirror colab/packing.py (PACKING_VERSION must match on
 both sides); floats travel as fp16 by fixed policy.
 """
+import http.client
 import json
 import struct
 import time
@@ -20,6 +21,7 @@ SOCKET_TIMEOUT = 120
 ENCODE_TIMEOUT = 600
 GENERATE_TIMEOUT = 3600
 ENCODE_RETRIES = 4
+POLL_MAX_FAILURES = 5
 PACKED_CONTENT_TYPE = "application/x-rcp-v3"
 
 ALLOWED_DTYPES = {
@@ -164,11 +166,20 @@ class RemoteCLIPClient:
                 return resp.status, resp.read(), dict(resp.headers)
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")
+            message = detail
             try:
-                message = json.loads(detail).get("detail") or detail
+                parsed = json.loads(detail)
             except ValueError:
-                message = detail
+                parsed = None
+            if isinstance(parsed, dict):
+                # FastAPI errors use "detail"; worker 503s use {"error": {...}}
+                message = parsed.get("detail") or parsed.get("error") or detail
+                if isinstance(message, dict):
+                    message = message.get("message") or json.dumps(message)
             raise WorkerError(f"{method} {path} -> HTTP {e.code}: {message}") from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError,
+                http.client.HTTPException) as e:
+            raise WorkerError(f"{method} {path} -> {e}") from None
 
     def get_status(self):
         _status, body, _headers = self._request("GET", "/v1/status")
@@ -230,15 +241,32 @@ class RemoteCLIPClient:
         job = json.loads(resp)
         job_id = job["job_id"]
         t0 = time.time()
+        poll_failures = 0
         while True:
-            _status, body, _hdr = self._request("GET", f"/v1/jobs/{job_id}")
+            try:
+                _status, body, _hdr = self._request("GET", f"/v1/jobs/{job_id}")
+            except WorkerError as e:
+                if "HTTP 404" in str(e):
+                    raise WorkerError(
+                        f"job {job_id} not found on worker (record expired or worker "
+                        "was restarted); generated text is lost") from None
+                poll_failures += 1
+                if poll_failures >= POLL_MAX_FAILURES:
+                    raise
+                log(f"job poll failed ({poll_failures}/{POLL_MAX_FAILURES}): {e}")
+                time.sleep(min(2 * poll_failures, 5))
+                continue
+            poll_failures = 0
             state = json.loads(body)
             if state["state"] == "done":
                 return state.get("text", "")
             if state["state"] == "error":
                 raise WorkerError(f"remote generation failed: {state.get('error')}")
             if time.time() - t0 > GENERATE_TIMEOUT:
-                self._request("DELETE", f"/v1/jobs/{job_id}")
+                try:
+                    self._request("DELETE", f"/v1/jobs/{job_id}")
+                except WorkerError as cleanup_error:
+                    log(f"job cleanup after timeout failed: {cleanup_error}")
                 raise WorkerError("remote generation timed out")
             time.sleep(1.0)
 
@@ -261,8 +289,9 @@ class RemoteCLIPClient:
             return json.loads(body)
         if action == "load_model":
             spec = {"name": params.get("model_name") or "",
-                    "kind": params.get("kind") or "",
-                    "source": params.get("source") or ""}
+                    "kind": params.get("kind") or ""}
+            if params.get("source"):
+                spec["source"] = params["source"]
             if params.get("dtype"):
                 spec["dtype"] = params["dtype"]
             if params.get("clip_type"):
@@ -308,6 +337,11 @@ class RemoteCLIPClient:
                                          {"name": params["model_name"]})
             return json.loads(body)
         if action == "shutdown":
+            if not params.get("shutdown_confirm"):
+                raise WorkerError(
+                    "shutdown aborted: enable 'shutdown_confirm' on the "
+                    "Remote CLIP Controller node, or POST /v1/server/shutdown "
+                    "with {\"confirm\": true} directly")
             _s, body, _h = self._request("POST", "/v1/server/shutdown",
                                          {"confirm": True})
             return json.loads(body)

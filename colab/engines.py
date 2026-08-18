@@ -1135,6 +1135,15 @@ class LoraPatcher:
                         weight.to(named[name].weight.device, named[name].weight.dtype))
         self.applied_sig = None
 
+    def reset(self, registry):
+        """Revert any applied stack and drop the cached pristine weights.
+        Called whenever an engine stops being the default (or is unloaded /
+        replaced), so a model swap can never leave stale LoRA state or hold
+        the CPU-side pristine copies."""
+        self.revert(registry)
+        self.applied_sig = None
+        self._pristine = {}
+
 
 # ---------------------------------------------------------------------------
 # registry
@@ -1162,6 +1171,15 @@ class EngineRegistry:
             return self.tokenizer_overrides[kind]
         return self.tokenizer_overrides.get({"sdxl_clip_l": "clip_l"}.get(kind, kind))
 
+    def _retire_engine(self, name):
+        """Reset the LoRA patcher of the engine currently registered under
+        `name` (if any), before the slot is dropped or overwritten."""
+        old = self.engines.get(name)
+        if old is not None:
+            lora = getattr(old, "lora", None)
+            if lora is not None:
+                lora.reset(self)
+
     def build_engine(self, spec, _top=True):
         kind = spec.get("kind", "")
         if engines_native.dispatch_is_native(spec):
@@ -1169,6 +1187,7 @@ class EngineRegistry:
             if engine is None:
                 raise ValueError(f"unknown engine kind: {kind}")
             engine.load_seconds = engine.load_seconds or 0
+            self._retire_engine(spec["name"])
             self.engines[spec["name"]] = engine
             if _top and self.default_name is None:
                 self.default_name = spec["name"]
@@ -1208,15 +1227,17 @@ class EngineRegistry:
         else:
             raise ValueError(f"unknown engine kind: {kind}")
         engine.load_seconds = round(time.time() - t0, 1)
+        self._retire_engine(name)
         self.engines[name] = engine
         if _top and self.default_name is None:
             self.default_name = name
         return engine
 
     def unload(self, name):
-        engine = self.engines.pop(name, None)
-        if engine is None:
+        if name not in self.engines:
             raise KeyError(f"model not loaded: {name}")
+        self._retire_engine(name)
+        engine = self.engines.pop(name)
         if self.default_name == name:
             self.default_name = next(iter(self.engines), None)
         self._cache.clear()
@@ -1227,6 +1248,8 @@ class EngineRegistry:
     def set_default(self, name):
         if name not in self.engines:
             raise KeyError(f"model not loaded: {name}")
+        if name != self.default_name:
+            self._retire_engine(self.default_name)
         self.default_name = name
         self._cache.clear()
 
@@ -1326,7 +1349,9 @@ class EngineRegistry:
                     self.cache_hits += 1
                     return cached
             self.cache_misses += 1
-            if lora_stack and engine.lora is not None:
+            # apply() doubles as the revert path: an empty stack restores
+            # pristine weights, so the call must stay unconditional.
+            if engine.lora is not None:
                 engine.lora.apply(engine, lora_stack, self)
             if getattr(engine, "handles_lora_internally", False):
                 result = engine.encode(text, kwargs, lora_stack,
@@ -1348,7 +1373,7 @@ class EngineRegistry:
     def generate(self, text, kwargs, gen_kwargs, lora_stack):
         engine = self.get_default()
         with self._infer_lock:
-            if lora_stack and engine.lora is not None:
+            if engine.lora is not None:
                 engine.lora.apply(engine, lora_stack, self)
             if getattr(engine, "handles_lora_internally", False):
                 out = engine.generate(text, kwargs, gen_kwargs, lora_stack,

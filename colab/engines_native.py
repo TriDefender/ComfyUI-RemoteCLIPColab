@@ -233,15 +233,16 @@ MODEL_SUBDIRS = ("", "text_encoders", "clip")
 
 
 def _resolve_source(s, registry):
-    """Bare filenames resolve against the worker's model dirs (CLIPLoader-style
-    'just the file name'); path-like sources stay as-is."""
-    if os.path.isabs(s) or _looks_like_path(s):
+    """Bare filenames (with or without extension) resolve against the worker's
+    model dirs (CLIPLoader-style 'just the file name'); path-like sources
+    (absolute or containing separators, including HF repo ids) stay as-is."""
+    if os.path.isabs(s) or os.sep in s or "/" in s or "\\" in s:
         return s
     for sub in MODEL_SUBDIRS:
         base = os.path.join(registry.models_dir, sub) if sub else registry.models_dir
-        candidate = os.path.join(base, s)
-        if os.path.isfile(candidate):
-            return candidate
+        for candidate in (os.path.join(base, s), os.path.join(base, s + ".safetensors")):
+            if os.path.isfile(candidate):
+                return candidate
     return s
 
 
@@ -293,8 +294,3 @@ def build_native_engine(spec, registry):
     embedding_directory = registry.embeddings_dir if registry.embeddings_dir else None
     return NativeEngine(spec["name"], kind, clip_type, sources,
                         embedding_directory=embedding_directory)
-
-
-def _looks_like_path(source):
-    return (os.sep in source or "/" in source or "\\" in source
-            or source.startswith(".") or source.endswith(".safetensors"))
