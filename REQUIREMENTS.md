@@ -47,6 +47,14 @@
 > - notebook 删除 cell 5 ipywidgets 控制面板（实际使用不可用）——管理操作全部经由
 >   ComfyUI `Remote CLIP Controller` 节点；cell 6/7 顺次改为 5/6，README 与
 >   notebook 内提示同步更新。
+> - notebook 重构（7 → 6 cell）：cell 1 只负责 clone（REPO_URL 默认
+>   github.com/TriDefender/ComfyUI-RemoteCLIPColab，RUNTIME_DIR 不再暴露为表单项、
+>   由 clone 推导）；cell 2 = Configure & Launch 合并原 cell 2/3（按 ATTENTION
+>   按需安装 sage/flash、重复运行自动停掉旧 worker 再拉起）；原 cell 4–7 顺次
+>   改为 3–6。clone 推导/幂等重跑本地 git 实测 3/3。
+> - Colab 表单修复：`# @param [...]` 选项列表后的尾随说明文字会使下拉框退化为
+>   纯文本框（ENGINE/ATTENTION/ATTENTION_HF 等即此症状）——全部说明移至参数行
+>   上方注释行，所有 @param 注解纯净（校验 0 违例）。
 > 原确认结论：Q1 Phase 1+2 合并；传输固定 fp16；TPU v5e 走 hf 后端
 >（bf16 计算 + 形状分桶，待 Colab 实测）。
 > 原型：`custom_nodes/ComfyUI-RemoteCLIPLoader`（v1.2.2，下称"旧版"）。
