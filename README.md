@@ -35,6 +35,34 @@ their original dtype on arrival.
   toggle enables it at `/content/rcp_xla_cache`. TPU attention kernels are
   chosen by the XLA compiler itself — no per-model flag applies.
 
+## VRAM management (native backend)
+
+The native backend uses ComfyUI's own model management, with the same
+"keep-as-much-in-VRAM-as-fits" behavior as a local ComfyUI: at each encode,
+weights that fit in free VRAM (minus a ~1.4 GB activation reserve) stay
+resident on the GPU for the whole session; overflow layers keep their weights
+in RAM, pinned, and upload to the GPU just-in-time per forward pass.
+
+`--vram {auto,stream,cpu}` (default `auto`) controls the strategy:
+
+- **auto** — try full GPU residency first; on CUDA OOM the worker frees VRAM
+  and retries on the partial-load path (max residency, overflow layers
+  stream), then on per-layer streaming, before failing with a clear error.
+  Each retry is logged. Big cards running small encoders keep the fast
+  full-residency path with zero overhead.
+- **stream** — skip the construction-time full-load gamble: weights stage in
+  RAM from the start and every encode uses the keep-what-fits budget. For
+  GPUs you already know are tight (e.g. a 16 GB card with the MiniMax H3
+  NVFP4 file), this avoids a doomed full-load attempt.
+- **cpu** — run the text encoder in RAM (ComfyUI `--novram` semantics).
+  Last resort; expect minutes per prompt on large encoders.
+
+This is also why a model that "partially falls back to RAM" locally used to
+OOM remotely: the vendored loader's construction-time heuristic could
+full-load the encoder without the activation reserve, and a worker GPU is
+often empty at load time — exactly the situation that misfires. The OOM
+ladder now degrades gracefully instead.
+
 ## Engine backends
 
 The worker has two interchangeable text-encoder backends (`--engine auto|native|hf`):
@@ -202,5 +230,8 @@ powershell -File vendor_comfy.ps1 <path-to-ComfyUI-checkout>
 | L4 24 GB | sd3, qwen_image (7B), causal_lm 8B, MiniMax H3 (NVFP4) |
 | A100 40 GB | everything incl. qwen_image + large causal LMs |
 | RTX 4060 Ti 16 GB (tested) | MiniMax H3 NVFP4 (14.9 GB file) loads and encodes via the native backend |
+
+Tight cards: if a model barely fits, `--vram stream` starts in the
+partial-load mode directly instead of trying full residency first.
 
 Node category: `Remote CLIP`

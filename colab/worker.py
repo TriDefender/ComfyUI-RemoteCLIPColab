@@ -100,6 +100,14 @@ def main():
                         help="native-backend attention kernel: auto (comfy default "
                              "sub-quad), sdpa (torch scaled_dot_product_attention), "
                              "sage (sageattention pkg), flash (flash-attn pkg)")
+    parser.add_argument("--vram", default=os.environ.get("RCP_VRAM", "auto"),
+                        choices=["auto", "stream", "cpu"],
+                        help="native-backend VRAM strategy: auto (maximize VRAM "
+                             "residency; on CUDA OOM degrade to partial-load then "
+                             "per-layer streaming and retry), stream (never "
+                             "full-load at construction; keep what fits in VRAM, "
+                             "stream overflow layers), cpu (run text encoder in "
+                             "RAM; last resort)")
     parser.add_argument("--attention-hf", default="sdpa", choices=["sdpa", "eager", "flash_attention_2"],
                         help="hf-backend attention implementation passed to "
                              "from_pretrained (CUDA only; TPU/XLA picks its own kernel)")
@@ -120,6 +128,7 @@ def main():
     args = parser.parse_args()
     if args.attention != "auto":
         os.environ["RCP_ATTENTION"] = args.attention
+    os.environ["RCP_VRAM"] = args.vram
     if args.device == "tpu":
         args.engine = "hf" if args.engine == "native" else args.engine
     args.engine_mode = resolve_engine_mode(args.engine)

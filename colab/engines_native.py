@@ -8,12 +8,16 @@ the original RemoteCLIPLoader worker used.
 
 comfy is imported lazily: the attention-kernel flags on comfy.cli_args.args
 must be set (from RCP_ATTENTION) BEFORE comfy.ldm.modules.attention binds its
-dispatch at import time, so nothing may import comfy before configure time.
+dispatch at import time, and the VRAM mode (RCP_VRAM=cpu -> --novram) must be
+applied before comfy.model_management reads those flags at import time, so
+nothing may import comfy before configure time.
 """
 import json
 import os
 import time
 from collections import OrderedDict
+
+import torch
 
 PATCHED_CLIP_CACHE = 4
 
@@ -23,9 +27,43 @@ comfy = None  # set by ensure_comfy(); module-level so engine methods can use co
 
 ATTENTION_MODES = ("auto", "sdpa", "sage", "flash")
 
+# RCP_VRAM (set from worker.py --vram BEFORE the first engine is built):
+#   auto   comfy heuristics + OOM degrade ladder: full-load -> max-residency
+#          partial load (overflow layers stream per-forward) -> per-layer
+#          streaming. VRAM residency is maximized at every step.
+#   stream skip the construction-time full-load gamble; weights stage in RAM
+#          and every encode uses the partial-load budget (keep-what-fits)
+#   cpu    comfy --novram semantics: text encoder runs in RAM (last resort)
+VRAM_MODES = ("auto", "stream", "cpu")
+
 
 def log(msg):
     print(f"[native {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def _is_cuda_oom(exc):
+    """torch.cuda.OutOfMemoryError on modern torch; substring fallback covers
+    ROCm/older builds where the raise is a plain RuntimeError."""
+    try:
+        if isinstance(exc, torch.cuda.OutOfMemoryError):
+            return True
+    except AttributeError:
+        pass
+    return "out of memory" in str(exc).lower()
+
+
+def _free_gpu_memory():
+    """Drop every loaded model and release cached CUDA blocks so a retry
+    starts from a clean allocator (half-moved weights from a failed full
+    load are freed by the gc pass)."""
+    import gc
+
+    try:
+        comfy.model_management.unload_all_models()
+    except Exception:  # noqa: BLE001 - best effort
+        pass
+    gc.collect()
+    comfy.model_management.soft_empty_cache()
 
 
 HF_KINDS = {"clip_l", "sdxl_clip_l", "clip_g", "t5", "qwen_image", "causal_lm",
@@ -80,6 +118,11 @@ def ensure_comfy():
             comfy.cli_args.args.use_flash_attention = True
         elif mode == "sdpa":
             comfy.cli_args.args.use_pytorch_cross_attention = True
+        vram_mode = os.environ.get("RCP_VRAM", "auto")
+        if vram_mode not in VRAM_MODES:
+            vram_mode = "auto"
+        if vram_mode == "cpu":
+            comfy.cli_args.args.novram = True
         import comfy.sd
         import comfy.utils
         import comfy.model_management
@@ -170,15 +213,13 @@ class NativeEngine:
         self.device = None
         self.dtype = None
         self.lora = None
+        self.per_layer_stream = False
 
-        clip_data = []
-        for src in sources:
-            sd, _metadata = comfy.utils.load_torch_file(src, safe_load=True, return_metadata=True)
-            clip_data.append(sd)
         ct = comfy.sd.CLIPType[clip_type] if clip_type else comfy.sd.CLIPType.STABLE_DIFFUSION
+        stream_only = os.environ.get("RCP_VRAM", "auto") == "stream"
         t0 = time.time()
-        self.clip = comfy.sd.load_text_encoder_state_dicts(
-            clip_data, embedding_directory=embedding_directory, clip_type=ct)
+        self.clip = self._build_clip(ct, embedding_directory,
+                                     {"initial_device": torch.device("cpu")} if stream_only else {})
         self.load_seconds = round(time.time() - t0, 1)
         try:
             self.device = self.clip.patcher.load_device
@@ -186,6 +227,29 @@ class NativeEngine:
         except Exception:  # noqa: BLE001 - status fields only
             pass
         self._patched = OrderedDict()
+
+    def _load_clip_data(self):
+        data = []
+        for src in self.sources:
+            sd, _metadata = comfy.utils.load_torch_file(src, safe_load=True, return_metadata=True)
+            data.append(sd)
+        return data
+
+    def _build_clip(self, ct, embedding_directory, model_options):
+        comfy = ensure_comfy()
+        try:
+            return comfy.sd.load_text_encoder_state_dicts(
+                self._load_clip_data(), embedding_directory=embedding_directory,
+                clip_type=ct, model_options=model_options)
+        except Exception as e:
+            if os.environ.get("RCP_VRAM", "auto") != "auto" or not _is_cuda_oom(e):
+                raise
+        log("CUDA OOM while constructing on GPU; freeing VRAM and retrying "
+            "with weights staged in RAM (partial-load budget path)")
+        _free_gpu_memory()
+        return comfy.sd.load_text_encoder_state_dicts(
+            self._load_clip_data(), embedding_directory=embedding_directory,
+            clip_type=ct, model_options={"initial_device": torch.device("cpu")})
 
     def _get_clip(self, lora_stack, lora_resolver):
         if not lora_stack:
@@ -209,17 +273,68 @@ class NativeEngine:
             self._patched.popitem(last=False)
         return clip
 
+    def _with_vram_state(self, fn):
+        """Run fn under NO_VRAM when this engine has already degraded to
+        per-layer streaming; restore the global afterwards so other engines
+        keep their normal budgets."""
+        if not self.per_layer_stream:
+            return fn()
+        mm = comfy.model_management
+        previous = mm.vram_state
+        mm.vram_state = mm.VRAMState.NO_VRAM
+        try:
+            return fn()
+        finally:
+            mm.vram_state = previous
+
+    def _run_with_oom_ladder(self, what, fn):
+        try:
+            return self._with_vram_state(fn)
+        except Exception as e:
+            if not _is_cuda_oom(e):
+                raise
+        log(f"CUDA OOM during {what}; unloading models and retrying with "
+            "partial VRAM residency (overflow layers stream per-forward)")
+        _free_gpu_memory()
+        try:
+            return self._with_vram_state(fn)
+        except Exception as e:
+            if not _is_cuda_oom(e):
+                raise
+        log(f"still OOM during {what}; switching this engine to per-layer "
+            "weight streaming (activations get nearly all VRAM)")
+        self.per_layer_stream = True
+        _free_gpu_memory()
+        try:
+            return self._with_vram_state(fn)
+        except Exception as e:
+            if not _is_cuda_oom(e):
+                raise
+        try:
+            free_gb = comfy.model_management.get_free_memory() / (1024 ** 3)
+            free_desc = f", {free_gb:.1f} GB free at failure"
+        except Exception:  # noqa: BLE001 - diagnostics only
+            free_desc = ""
+        raise RuntimeError(
+            f"CUDA out of memory during {what} even with per-layer weight "
+            f"streaming{free_desc}; this model does not fit the worker GPU. "
+            "Options: a smaller checkpoint, a bigger runtime, or restart the "
+            "worker with --vram cpu (text encoder runs in RAM; slow).") from None
+
     def encode(self, text, kwargs, lora_stack, lora_resolver=None):
-        clip = self._get_clip(lora_stack, lora_resolver)
-        tokens = clip.tokenize(text, **kwargs)
-        out = clip.encode_from_tokens(tokens, return_dict=True)
-        return out
+        def run():
+            clip = self._get_clip(lora_stack, lora_resolver)
+            tokens = clip.tokenize(text, **kwargs)
+            return clip.encode_from_tokens(tokens, return_dict=True)
+        return self._run_with_oom_ladder("encode", run)
 
     def generate(self, text, kwargs, gen_kwargs, lora_stack, lora_resolver=None):
-        clip = self._get_clip(lora_stack, lora_resolver)
-        tokens = clip.tokenize(text, **kwargs)
-        generated = clip.generate(tokens, **gen_kwargs)
-        return clip.decode(generated)
+        def run():
+            clip = self._get_clip(lora_stack, lora_resolver)
+            tokens = clip.tokenize(text, **kwargs)
+            generated = clip.generate(tokens, **gen_kwargs)
+            return clip.decode(generated)
+        return self._run_with_oom_ladder("generate", run)
 
     def unload(self):
         self._patched.clear()
